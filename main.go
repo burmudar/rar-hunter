@@ -5,9 +5,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+var verbose = false
 
 type sfvFile struct {
 	items map[string]string
@@ -18,16 +21,37 @@ type fileList struct {
 	files map[string]interface{}
 }
 
-func (f *fileList) findWithExt(ext string) []string {
+type unrar struct {
+	filename string
+	wd       string
+}
+
+func (u *unrar) path() string {
+	return filepath.Join(u.wd, u.filename)
+}
+
+func (f *fileList) find(filter func(item string) bool) []string {
 	files := []string{}
 	for file := range f.files {
-		fileExt := filepath.Ext(file)
-		if fileExt == ext {
+		if filter(file) {
 			files = append(files, file)
 		}
 	}
 
 	return files
+}
+
+func (f *fileList) findName(name string) []string {
+	return f.find(func(item string) bool {
+		return name == item
+	})
+}
+
+func (f *fileList) findWithExt(ext string) []string {
+	return f.find(func(item string) bool {
+		fileExt := filepath.Ext(item)
+		return ext == fileExt
+	})
 
 }
 
@@ -82,7 +106,7 @@ func parseSFV(filename string) (*sfvFile, error) {
 	return sfv, nil
 }
 
-func whatIsMissing(sfv *sfvFile, dir *fileList) []string {
+func anyMissing(sfv *sfvFile, dir *fileList) []string {
 	missing := []string{}
 	for sfvFile := range sfv.items {
 		if _, ok := dir.files[sfvFile]; !ok {
@@ -93,35 +117,127 @@ func whatIsMissing(sfv *sfvFile, dir *fileList) []string {
 	return missing
 }
 
-func run(args []string) error {
-	targetDir := os.Args[1]
-
-	fmt.Printf("checking dir: %s\n", targetDir)
-	list, _ := listFiles(targetDir)
-
-	sfvFile := ""
-	fmt.Printf("finding sfv file in %s\n", targetDir)
-	if files := list.findWithExt(".sfv"); len(files) > 0 {
-		sfvFile = list.Path(files[0])
-	} else {
-		return fmt.Errorf("no .sfv files found in %s\n", targetDir)
+func findFirst[T any](list []T) (*T, error) {
+	if len(list) > 0 {
+		return &list[0], nil
 	}
 
-	fmt.Printf("parsing %s\n", sfvFile)
+	return nil, fmt.Errorf("no first because zero length")
+}
+
+func filenameFromRar(rarPath string) (string, error) {
+	cmd := exec.Command("unrar", []string{"lb", rarPath}...)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("rar command failure: %w", err)
+	}
+
+	return string(out), nil
+
+}
+
+func extractedFile(rar string, dir *fileList) (filename string, exists bool) {
+	name, err := filenameFromRar(dir.Path(rar))
+	if err != nil {
+		return filename, exists
+	}
+
+	names := dir.findName(name)
+	if len(names) > 0 {
+		filename = dir.Path(names[0])
+		exists = true
+	}
+
+	return filename, exists
+}
+
+func findUnrarable(dir *fileList) (*unrar, error) {
+	result := unrar{filename: "", wd: dir.root}
+	sfvFile := ""
+	if files := dir.findWithExt(".sfv"); len(files) > 0 {
+		sfvFile = dir.Path(files[0])
+	} else {
+		return &result, fmt.Errorf("no .sfv files found in %s\n", dir.root)
+	}
+
 	sfv, err := parseSFV(sfvFile)
 	if err != nil {
-		return err
+		return &result, err
 	}
 
-	for k, v := range sfv.items {
-		fmt.Printf("%s %s\n", k, v)
+	missing := anyMissing(sfv, dir)
+	if len(missing) > 0 {
+		if verbose {
+			for _, m := range missing {
+				fmt.Printf("Missing files: %s\n", m)
+			}
+		}
+		return nil, fmt.Errorf("rar files missing")
 	}
 
-	missing := whatIsMissing(sfv, list)
-
-	for _, m := range missing {
-		fmt.Printf("missing: %s\n", m)
+	rar, err := findFirst(dir.findWithExt(".rar"))
+	if err != nil {
+		return &result, fmt.Errorf("no .rar file found")
 	}
+
+	file, exists := extractedFile(*rar, dir)
+	if exists {
+		return &result, fmt.Errorf("%q already exists", file)
+	}
+	result.filename = *rar
+
+	return &result, err
+}
+
+func doUnrarAll(targets []*unrar) ([]string, error) {
+	for _, t := range targets {
+		fmt.Printf("Will run: %s in %s\n", t.filename, t.wd)
+	}
+
+	return nil, nil
+}
+
+func allDirs(start string) []string {
+	dirs := []string{start}
+	filepath.WalkDir(start, func(path string, d fs.DirEntry, err error) error {
+		if start == path {
+			return nil
+		}
+		if d.IsDir() {
+			dirs = append(dirs, path)
+		}
+
+		return nil
+	})
+
+	return dirs
+}
+
+func run(args []string) error {
+	targetDir := os.Args[1]
+	allDirs := allDirs(targetDir)
+
+	unrars := make([]*unrar, 0)
+
+	skipCount := 0
+	for _, target := range allDirs {
+		dir, _ := listFiles(target)
+		unrar, err := findUnrarable(dir)
+		if err != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "skipping %s\n", target)
+			}
+			skipCount++
+			continue
+		}
+		fmt.Printf("unrar candidate: %s\n", unrar.path())
+
+		unrars = append(unrars, unrar)
+	}
+	fmt.Fprintf(os.Stderr, "skipped %d dirs\n", skipCount)
+
+	doUnrarAll(unrars)
 
 	return nil
 }
@@ -132,7 +248,7 @@ func main() {
 	}
 
 	if err := run(os.Args); err != nil {
-		fmt.Printf("unexpected error: %v", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
 
