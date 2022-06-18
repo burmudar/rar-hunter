@@ -24,28 +24,6 @@ type Unrar struct {
 	wd       string
 }
 
-type CriteriaResult[T any] struct {
-	Value    T
-	Reason   string
-	StringFn func(v T) string
-}
-
-func (c *CriteriaResult[T]) String() string {
-	var value string
-	if c.StringFn == nil {
-		value = fmt.Sprintf("%v", c.Value)
-	} else {
-		value = c.StringFn(c.Value)
-	}
-	return fmt.Sprintf("Reason: %s\n", value)
-}
-
-func (c *CriteriaResult[T]) Error() error {
-	return fmt.Errorf(c.String())
-}
-
-type Criteria[T any] func(dir *DirSnapshot, sfv *SFVFile) (bool, CriteriaResult[T])
-
 func (u *Unrar) Path() string {
 	return filepath.Join(u.wd, u.filename)
 }
@@ -53,6 +31,7 @@ func (u *Unrar) Path() string {
 func (f *DirSnapshot) Find(filter func(item string) bool) []string {
 	files := []string{}
 	for file := range f.files {
+		file = strings.TrimSpace(file)
 		if filter(file) {
 			files = append(files, file)
 		}
@@ -94,7 +73,7 @@ func NewDirSnapshot(root string) (*DirSnapshot, error) {
 		if root == path {
 			return nil
 		}
-		name := filepath.Base(path)
+		name := strings.TrimSpace(filepath.Base(path))
 		list.files[name] = nil
 		return nil
 	})
@@ -153,55 +132,7 @@ func filenameFromRar(rarPath string) (string, error) {
 		return "", fmt.Errorf("rar command failure: %w", err)
 	}
 
-	return string(out), nil
-
-}
-
-func extractedFile(rar string, dir *DirSnapshot) (filename string, exists bool) {
-	name, err := filenameFromRar(dir.Path(rar))
-	if err != nil {
-		return filename, exists
-	}
-
-	names := dir.FindName(name)
-	if len(names) > 0 {
-		filename = dir.Path(names[0])
-		exists = true
-	}
-
-	return filename, exists
-}
-
-func NoMissingFiles(dir *DirSnapshot, sfv *SFVFile) (bool, CriteriaResult[[]string]) {
-	var result CriteriaResult[[]string]
-	missing := anyMissing(sfv, dir)
-	if len(missing) > 0 {
-		result.Value = missing
-		result.Reason = "required files were missing"
-		result.StringFn = func(v []string) string {
-			return fmt.Sprintf("Missing files:\n%s\n", strings.Join(v, "\n"))
-		}
-	}
-
-	return len(result.Value) > 0, result
-}
-
-func NotAlreadyUnrared(dir *DirSnapshot, sfv *SFVFile) (bool, CriteriaResult[string]) {
-	var result CriteriaResult[string]
-	rar, err := findFirst(dir.FindExt(".rar"))
-	if err != nil {
-		return false, result
-	}
-
-	file, exists := extractedFile(*rar, dir)
-	result.Value = file
-	if exists {
-		result.Reason = "file already exists"
-		result.StringFn = func(v string) string { return v }
-		return false, result
-	}
-
-	return true, result
+	return strings.TrimSpace(string(out)), nil
 
 }
 
@@ -232,15 +163,95 @@ func FindUnrarable(dir *DirSnapshot) (*Unrar, error) {
 		return nil, fmt.Errorf("faile to find .rar in %s", dir.root)
 	}
 
+	// dir.FindExt is a bit inconsistent. When do we need to find the relative path and when do we not ?
 	result.filename = *v
 
 	return &result, err
 }
 
-func DoAll(targets []*Unrar) ([]string, error) {
-	for _, t := range targets {
-		fmt.Printf("Will run: %s in %s\n", t.filename, t.wd)
+func pipeReader(cmd *exec.Cmd) (io.Reader, error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	return io.MultiReader(stdout, stderr), nil
+
+}
+
+func DoAll(targets []*Unrar, w io.Writer) error {
+	rFn := func(src string, data []byte, err error) struct {
+		src  string
+		data string
+		err  error
+	} {
+		return struct {
+			src  string
+			data string
+			err  error
+		}{
+			src, "data: " + string(data), err,
+		}
+	}
+	var resultCh chan struct {
+		src  string
+		data string
+		err  error
+	} = make(chan struct {
+		src  string
+		data string
+		err  error
+	})
+	var errors []error = []error{}
+	for i := 0; i < len(targets); i++ {
+		target := targets[i]
+		fmt.Printf("unrar %s in %s\n", target.filename, target.wd)
+		go func() {
+			cmd := exec.Command("unrar", []string{"e", target.filename}...)
+			cmd.Dir = target.wd
+			// TODO: We have to read stdout and stdpipe seperately since errors are on stderr but command exits with 0
+			// TODO: We have to handle  the output and error reporting better
+			out, err := pipeReader(cmd)
+			if err != nil {
+				resultCh <- rFn(target.filename, nil, fmt.Errorf("stdout pipe: %w", err))
+				return
+			}
+			if err := cmd.Start(); err != nil {
+				data, _ := io.ReadAll(out)
+				resultCh <- rFn(target.filename, data, err)
+				return
+			}
+			data, err := io.ReadAll(out)
+			if err != nil && err != io.EOF {
+				resultCh <- rFn(target.filename, nil, fmt.Errorf("out read: %w", err))
+			}
+			err = cmd.Wait()
+			resultCh <- rFn(target.filename, data, err)
+		}()
 	}
 
-	return nil, nil
+	count := len(targets)
+	for count > 0 {
+		select {
+		case r := <-resultCh:
+			{
+				if r.err != nil {
+					errors = append(errors, fmt.Errorf("[%s] did not complete successfully:  %s", r.src, r.err))
+				}
+				count--
+			}
+		}
+	}
+
+	if len(errors) > 0 {
+		content := ""
+		for _, e := range errors {
+			content = content + e.Error() + "\n"
+		}
+		return fmt.Errorf("encountered %d errors\n%s\n", len(targets), content)
+	}
+	return nil
 }

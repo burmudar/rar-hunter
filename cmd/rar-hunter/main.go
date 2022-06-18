@@ -36,19 +36,16 @@ func run(args []string) error {
 		dir, _ := rary.NewDirSnapshot(target)
 		unrar, err := rary.FindUnrarable(dir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "skipping %s\n", target)
+			//fmt.Fprintf(os.Stderr, "skipping %s\n", target)
 			skipCount++
 			continue
 		}
-		fmt.Printf("unrar candidate: %s\n", unrar.Path())
 
 		unrars = append(unrars, unrar)
 	}
 	fmt.Fprintf(os.Stderr, "skipped %d dirs\n", skipCount)
 
-	rary.DoAll(unrars)
-
-	return nil
+	return rary.DoAll(unrars, os.Stdout)
 }
 
 func main() {
