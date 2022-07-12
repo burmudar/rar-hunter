@@ -27,7 +27,7 @@ func (c *CriteriaResult[T]) Error() error {
 
 type Criteria[T any] func(dir *DirSnapshot, sfv *SFVFile) (bool, CriteriaResult[T])
 
-func NoMissingFiles(dir *DirSnapshot, sfv *SFVFile) (bool, CriteriaResult[[]string]) {
+func MissingFiles(dir *DirSnapshot, sfv *SFVFile) (bool, CriteriaResult[[]string]) {
 	var result CriteriaResult[[]string]
 	missing := anyMissing(sfv, dir)
 	if len(missing) > 0 {
@@ -41,11 +41,12 @@ func NoMissingFiles(dir *DirSnapshot, sfv *SFVFile) (bool, CriteriaResult[[]stri
 	return len(result.Value) > 0, result
 }
 
-func NotAlreadyUnrared(dir *DirSnapshot, sfv *SFVFile) (bool, CriteriaResult[string]) {
+func AlreadyUnrared(dir *DirSnapshot, sfv *SFVFile) (bool, CriteriaResult[string]) {
 	var result CriteriaResult[string]
 	result.StringFn = func(v string) string { return v }
 	rar, err := findFirst(dir.FindExt(".rar"))
 	if err != nil {
+		result.Reason = fmt.Sprintf("error finding .rar files: %v", err)
 		return false, result
 	}
 
@@ -58,9 +59,9 @@ func NotAlreadyUnrared(dir *DirSnapshot, sfv *SFVFile) (bool, CriteriaResult[str
 	if len(names) > 0 {
 		name = dir.Path(names[0])
 		result.Reason = "file already exists"
-		return false, result
+		return true, result
 	}
 	result.Value = name
-	return true, result
+	return false, result
 
 }

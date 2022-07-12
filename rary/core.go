@@ -150,11 +150,11 @@ func FindUnrarable(dir *DirSnapshot) (*Unrar, error) {
 		return &result, err
 	}
 
-	if ok, criteria := NoMissingFiles(dir, sfv); !ok {
+	if ok, criteria := MissingFiles(dir, sfv); ok {
 		return nil, criteria.Error()
 	}
 
-	if ok, criteria := NotAlreadyUnrared(dir, sfv); !ok {
+	if ok, criteria := AlreadyUnrared(dir, sfv); ok {
 		return nil, criteria.Error()
 	}
 
