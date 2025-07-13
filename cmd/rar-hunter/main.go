@@ -40,7 +40,7 @@ func run(ctx context.Context, args []string) error {
 		eventbus.Default().Stop(5 * time.Second)
 	}()
 
-	targetDir := os.Args[1]
+	targetDir := args[1]
 	allDirs := allDirs(targetDir)
 
 	unrars := make([]*rary.Unrar, 0)
