@@ -87,6 +87,7 @@ type EventBus struct {
 	wg          sync.WaitGroup
 	ctx         context.Context
 	cancel      context.CancelFunc
+	running     bool
 }
 
 func (e *EventBus) getSubscribers(t reflect.Type) []*Subscriber {
@@ -111,6 +112,12 @@ func New(ctx context.Context) *EventBus {
 }
 
 func (e *EventBus) Start() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.running {
+		return
+	}
 	e.jobQueue = make(chan *job, 100)
 	e.workers = []*eventWorker{
 		{
@@ -121,6 +128,8 @@ func (e *EventBus) Start() {
 	for _, w := range e.workers {
 		e.startWorker(w)
 	}
+
+	e.running = true
 }
 
 func (e *EventBus) startWorker(w *eventWorker) {
@@ -132,6 +141,12 @@ func (e *EventBus) startWorker(w *eventWorker) {
 }
 
 func (e *EventBus) Stop(timeout time.Duration) {
+	e.mu.RLock()
+	if !e.running {
+		e.mu.RUnlock()
+		return
+	}
+	e.mu.RUnlock()
 	done := make(chan struct{})
 	go func() {
 		// wait for workers to exit
@@ -151,6 +166,9 @@ func (e *EventBus) Stop(timeout time.Duration) {
 	}
 
 	close(e.jobQueue)
+	e.mu.Lock()
+	e.running = false
+	e.mu.Unlock()
 }
 
 func (s *Subscriber) Close() {
@@ -190,6 +208,11 @@ func Subscribe[T any](bus *EventBus, event T, cb EventCallback[T]) Subscription 
 }
 
 func Publish[T any](bus *EventBus, event T) {
+	bus.mu.RLock()
+	defer bus.mu.RUnlock()
+	if !bus.running {
+		return
+	}
 	select {
 	case <-bus.ctx.Done():
 		return

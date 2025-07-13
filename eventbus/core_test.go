@@ -126,4 +126,29 @@ func TestEventBus(t *testing.T) {
 
 		Publish(bus, dummyEvent{})
 	})
+	t.Run("publish on stopped eventbus", func(t *testing.T) {
+		bus := New(t.Context())
+		// shoud not panic if we haven't started
+		Publish(bus, dummyEvent{})
+		bus.Start()
+		bus.Stop(100 * time.Millisecond)
+		// should also not panic if we explicitly stopped
+		Publish(bus, dummyEvent{})
+		defer func() {
+			t.Helper()
+			if err := recover(); err != nil {
+				t.Fatalf("publishing on stopped eventbus should not panic")
+			}
+		}()
+	})
+	t.Run("calling stop on not started eventbus", func(t *testing.T) {
+		bus := New(t.Context())
+		bus.Stop(100 * time.Millisecond)
+		defer func() {
+			t.Helper()
+			if err := recover(); err != nil {
+				t.Fatalf("publishing on stopped eventbus should not panic")
+			}
+		}()
+	})
 }
