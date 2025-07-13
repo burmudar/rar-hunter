@@ -1,3 +1,3 @@
 module github.com/burmudar/rar-hunter
 
-go 1.18
+go 1.24.3
