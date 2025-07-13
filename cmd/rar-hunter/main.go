@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"time"
 
+	"github.com/burmudar/rar-hunter/eventbus"
 	rary "github.com/burmudar/rar-hunter/rary"
 )
 
@@ -25,7 +29,18 @@ func allDirs(start string) []string {
 	return dirs
 }
 
-func run(args []string) error {
+func run(ctx context.Context, args []string) error {
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+
+	bus := eventbus.New(ctx)
+	bus.Start()
+
+	go func() {
+		<-ctx.Done()
+		cancel()
+		bus.Stop(5 * time.Second)
+	}()
+
 	targetDir := os.Args[1]
 	allDirs := allDirs(targetDir)
 
@@ -45,6 +60,7 @@ func run(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "skipped %d dirs\n", skipCount)
 
+	// make rary context aware
 	return rary.DoAll(unrars, os.Stdout)
 }
 
@@ -53,7 +69,8 @@ func main() {
 		panic("need one argument")
 	}
 
-	if err := run(os.Args); err != nil {
+	ctx := context.Background()
+	if err := run(ctx, os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
