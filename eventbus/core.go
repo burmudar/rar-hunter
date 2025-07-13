@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+var Default = sync.OnceValue(func() *EventBus {
+	return New()
+})
+
 type EventCallback[T any] func(ctx context.Context, e *T) error
 
 type Subscription interface {
@@ -101,19 +105,17 @@ func (e *EventBus) getSubscribers(t reflect.Type) []*Subscriber {
 	return []*Subscriber{}
 }
 
-func New(ctx context.Context) *EventBus {
-	ctx, cancel := context.WithCancel(ctx)
+func New() *EventBus {
 	return &EventBus{
 		subscribers: map[reflect.Type][]*Subscriber{},
-		ctx:         ctx,
-		cancel:      cancel,
 		mu:          sync.RWMutex{},
 	}
 }
 
-func (e *EventBus) Start() {
+func (e *EventBus) Start(ctx context.Context) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.ctx, e.cancel = context.WithCancel(ctx)
 
 	if e.running {
 		return
@@ -172,10 +174,10 @@ func (e *EventBus) Stop(timeout time.Duration) {
 }
 
 func (s *Subscriber) Close() {
-	Unsubscribe(s.bus, s)
+	UnsubscribeWith(s.bus, s)
 }
 
-func Unsubscribe(bus *EventBus, sub *Subscriber) {
+func UnsubscribeWith(bus *EventBus, sub *Subscriber) {
 	subs := bus.getSubscribers(sub.eventType)
 	subs = slices.DeleteFunc(subs, func(v *Subscriber) bool { return sub.id == v.id })
 	bus.mu.Lock()
@@ -183,7 +185,15 @@ func Unsubscribe(bus *EventBus, sub *Subscriber) {
 	bus.mu.Unlock()
 }
 
-func Subscribe[T any](bus *EventBus, event T, cb EventCallback[T]) Subscription {
+func Subscribe[T any](event T, cb EventCallback[T]) Subscription {
+	return SubscribeWith(Default(), event, cb)
+}
+
+func Unsubscribe(sub *Subscriber) {
+	UnsubscribeWith(Default(), sub)
+}
+
+func SubscribeWith[T any](bus *EventBus, event T, cb EventCallback[T]) Subscription {
 	id := rand.Int()
 	eventType := reflect.TypeOf(event)
 	sub := Subscriber{
@@ -207,7 +217,11 @@ func Subscribe[T any](bus *EventBus, event T, cb EventCallback[T]) Subscription 
 	return &sub
 }
 
-func Publish[T any](bus *EventBus, event T) {
+func Publish[T any](event T) {
+	PublishWith(Default(), event)
+}
+
+func PublishWith[T any](bus *EventBus, event T) {
 	bus.mu.RLock()
 	defer bus.mu.RUnlock()
 	if !bus.running {

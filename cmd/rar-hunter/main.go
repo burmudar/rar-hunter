@@ -32,13 +32,12 @@ func allDirs(start string) []string {
 func run(ctx context.Context, args []string) error {
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 
-	bus := eventbus.New(ctx)
-	bus.Start()
+	eventbus.Default().Start(ctx)
 
 	go func() {
 		<-ctx.Done()
 		cancel()
-		bus.Stop(5 * time.Second)
+		eventbus.Default().Stop(5 * time.Second)
 	}()
 
 	targetDir := os.Args[1]
